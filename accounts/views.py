@@ -1,0 +1,72 @@
+from allauth.socialaccount.providers.google.views import GoogleOAuth2Adapter
+from allauth.socialaccount.providers.oauth2.client import OAuth2Client
+from dj_rest_auth.registration.views import SocialLoginView
+from django.contrib.auth import get_user_model
+from rest_framework import generics, viewsets, status
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework.decorators import action
+from .models import SavedAddress
+from .serializers import (
+    CustomTokenObtainPairSerializer, RegisterSerializer,
+    UserSerializer, SavedAddressSerializer
+)
+
+User = get_user_model()
+
+
+class RegisterView(generics.CreateAPIView):
+    queryset = User.objects.all()
+    permission_classes = (AllowAny,)
+    serializer_class = RegisterSerializer
+
+
+class CustomTokenObtainPairView(TokenObtainPairView):
+    serializer_class = CustomTokenObtainPairSerializer
+
+
+class UserProfileView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        serializer = UserSerializer(request.user)
+        return Response(serializer.data)
+
+    def patch(self, request):
+        serializer = UserSerializer(request.user, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class SavedAddressViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+    serializer_class = SavedAddressSerializer
+
+    def get_queryset(self):
+        return SavedAddress.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+    @action(detail=True, methods=['post'], url_path='set-default')
+    def set_default(self, request, pk=None):
+        addr = self.get_object()
+        addr.is_default = True
+        addr.save()
+        return Response(SavedAddressSerializer(addr).data)
+
+
+class GoogleLogin(SocialLoginView):
+    adapter_class = GoogleOAuth2Adapter
+    client_class = OAuth2Client
+    callback_url = "postmessage"
+
+    def post(self, request, *args, **kwargs):
+        if hasattr(request.data, '_mutable'):
+            request.data._mutable = True
+        request.data['callback_url'] = "postmessage"
+        return super().post(request, *args, **kwargs)
