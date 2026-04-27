@@ -1,2 +1,6 @@
 from django.urls import path
-urlpatterns = []
+from .views import VerifyPaymentView # You will implement this later
+
+urlpatterns = [
+    path('verify/', VerifyPaymentView.as_view(), name='verify-payment'),
+]
