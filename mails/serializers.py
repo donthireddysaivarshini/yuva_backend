@@ -27,6 +27,7 @@ class BulkOrderFormSerializer(serializers.Serializer):
         if value < 5:
             raise serializers.ValidationError("Minimum order quantity is 5 units.")
         return value
+    
 
 
 class ContactFormSerializer(serializers.Serializer):

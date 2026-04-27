@@ -5,11 +5,13 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from .serializers import BulkOrderFormSerializer, ContactFormSerializer, ComplaintFormSerializer
+from rest_framework.permissions import AllowAny
 
 RECIPIENT = "info@yuvacomputers.in"
 
 
 class BulkOrderFormView(APIView):
+    permission_classes = [AllowAny]
     def post(self, request):
         serializer = BulkOrderFormSerializer(data=request.data)
         if not serializer.is_valid():
@@ -17,7 +19,7 @@ class BulkOrderFormView(APIView):
 
         data = serializer.validated_data
         subject = f"Bulk Order Request – {data['company']} ({data['quantity']} units)"
-        html_body = render_to_string("contact/bulk_order_email.html", {"data": data})
+        html_body = render_to_string("mails/bulk_order_email.html", {"data": data})
         text_body = (
             f"Bulk Order Request\n\n"
             f"Name: {data['name']}\n"
@@ -37,6 +39,7 @@ class BulkOrderFormView(APIView):
 
 
 class ContactFormView(APIView):
+    permission_classes = [AllowAny]
     def post(self, request):
         serializer = ContactFormSerializer(data=request.data)
         if not serializer.is_valid():
@@ -44,7 +47,7 @@ class ContactFormView(APIView):
 
         data = serializer.validated_data
         subject = f"Contact – {data['issue_type']} from {data['name']}"
-        html_body = render_to_string("contact/contact_email.html", {"data": data})
+        html_body = render_to_string("mails/contact_email.html", {"data": data})
         text_body = (
             f"Contact Form Submission\n\n"
             f"Name: {data['name']}\n"
@@ -63,6 +66,7 @@ class ContactFormView(APIView):
 
 
 class ComplaintFormView(APIView):
+    permission_classes = [AllowAny]
     def post(self, request):
         serializer = ComplaintFormSerializer(data=request.data)
         if not serializer.is_valid():
@@ -70,7 +74,7 @@ class ComplaintFormView(APIView):
 
         data = serializer.validated_data
         subject = f"Complaint – {data['issue_type']} | Order {data['order_id']}"
-        html_body = render_to_string("contact/complaint_email.html", {"data": data})
+        html_body = render_to_string("mails/complaint_email.html", {"data": data})
         text_body = (
             f"Complaint / Feedback Submission\n\n"
             f"Name: {data['name']}\n"
