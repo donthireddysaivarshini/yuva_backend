@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<style>
+  body { font-family: 'Segoe UI', sans-serif; background: #f4f4f5; margin: 0; padding: 24px; color: #18181b; }
+  .card { background: #fff; border-radius: 12px; max-width: 560px; margin: 0 auto; padding: 32px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
+  .badge { display: inline-block; background: #0ea5e9; color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.1em; padding: 4px 12px; border-radius: 99px; text-transform: uppercase; margin-bottom: 16px; }
+  h2 { margin: 0 0 24px; font-size: 20px; font-weight: 800; color: #18181b; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 10px 0; vertical-align: top; }
+  td:first-child { color: #71717a; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; width: 36%; padding-right: 12px; }
+  td:last-child { font-size: 14px; color: #18181b; font-weight: 500; }
+  tr { border-bottom: 1px solid #f1f1f1; }
+  tr:last-child { border-bottom: none; }
+  .msg-block { background: #f4f4f5; border-radius: 8px; padding: 12px; font-size: 13px; margin-top: 4px; color: #3f3f46; line-height: 1.6; }
+  .footer { margin-top: 24px; font-size: 12px; color: #a1a1aa; text-align: center; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">Contact Form</div>
+    <h2>New Support Message</h2>
+    <table>
+      <tr><td>Name</td><td>{{ data.name }}</td></tr>
+      <tr><td>Email</td><td>{{ data.email }}</td></tr>
+      <tr><td>Phone</td><td>+91 {{ data.phone }}</td></tr>
+      {% if data.order_id %}<tr><td>Order ID</td><td>{{ data.order_id }}</td></tr>{% endif %}
+      <tr><td>Issue Type</td><td>{{ data.issue_type }}</td></tr>
+      <tr><td>Message</td><td><div class="msg-block">{{ data.message }}</div></td></tr>
+    </table>
+    <div class="footer">Yuva Computers · yuvacomputers.in</div>
+  </div>
+</body>
+</html>

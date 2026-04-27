@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from datetime import timedelta
 from dotenv import load_dotenv
+import datetime
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / '.env')
@@ -9,6 +10,10 @@ load_dotenv(BASE_DIR / '.env')
 SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY')
 DEBUG = os.environ.get('DEBUG', 'True') == 'True'
 ALLOWED_HOSTS = ['*']
+
+SIMPLE_JWT = {
+    'LEEWAY': 60, 
+}
 
 INSTALLED_APPS = [
     'jazzmin',
@@ -38,7 +43,7 @@ INSTALLED_APPS = [
     'orders',
     'payments',
     'content',
-    'contact',
+    'mails',
 ]
 
 SITE_ID = 1

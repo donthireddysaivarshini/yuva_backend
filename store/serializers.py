@@ -13,10 +13,20 @@ class BrandSerializer(serializers.ModelSerializer):
 
 
 class CategorySerializer(serializers.ModelSerializer):
+    # Add this field to return the full absolute URL
+    image = serializers.SerializerMethodField()
+
     class Meta:
         model = Category
         fields = ['id', 'name', 'slug', 'image', 'is_featured']
 
+    def get_image(self, obj):
+        if obj.image:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.image.url)
+            return obj.image.url # Fallback
+        return None
 
 class UsageTagSerializer(serializers.ModelSerializer):
     class Meta:
@@ -28,6 +38,8 @@ class ProductImageSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductImage
         fields = ['id', 'image', 'is_primary', 'order']
+
+    
 
 
 class ProductVariantSerializer(serializers.ModelSerializer):

@@ -6,22 +6,42 @@ from rest_framework import generics, status, permissions
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.pagination import PageNumberPagination
 
-from .models import Order, OrderItem
-from .serializers import OrderSerializer
+from .models import Order, OrderItem, ReturnRequest, ExchangeCode
+from .serializers import OrderSerializer, ReturnRequestSerializer
 from store.models import Product, ProductVariant, SiteConfig, Coupon
 from accounts.models import SavedAddress
-from payments.razorpay_client import create_order as razorpay_create_order
+from payments.razorpay_client import create_order as razorpay_create_order, _get_client
+
+
+class OrderPagination(PageNumberPagination):
+    page_size = 5
+    page_size_query_param = 'page_size'
+    max_page_size = 20
 
 
 class OrderListView(generics.ListAPIView):
     serializer_class = OrderSerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = OrderPagination
 
     def get_queryset(self):
         return Order.objects.filter(
             user=self.request.user
-        ).prefetch_related('items').order_by('-created_at')
+        ).prefetch_related('items', 'return_requests__exchange_code').order_by('-created_at')
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def order_detail(request, pk):
+    try:
+        order = Order.objects.prefetch_related(
+            'items', 'return_requests__exchange_code'
+        ).get(pk=pk, user=request.user)
+        return Response(OrderSerializer(order).data)
+    except Order.DoesNotExist:
+        return Response({'error': 'Order not found'}, status=404)
 
 
 class CheckoutView(APIView):
@@ -32,22 +52,21 @@ class CheckoutView(APIView):
         cart_items = data.get('items', [])
         payment_method = data.get('payment_method', 'Online')
         coupon_code = data.get('coupon_code', '').strip().upper()
+        exchange_code_input = data.get('exchange_code', '').strip().upper()
         save_as_default = data.get('save_as_default', False)
+        accepted_return_policy = data.get('accepted_return_policy', False)
 
         if not cart_items:
-            return Response(
-                {'error': 'Cart is empty'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': 'Cart is empty'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # ── 1. Load site config ──────────────────────────────────────────────
+        # ── 1. Site config ───────────────────────────────────────────────────
         config = SiteConfig.objects.first()
         shipping_flat = Decimal(str(config.shipping_fee)) if config else Decimal('0')
         free_threshold = Decimal(str(config.free_shipping_threshold)) if config else Decimal('0')
         cod_pct = Decimal(str(config.cod_surcharge_percentage)) if config else Decimal('2')
         tax_pct = Decimal(str(config.tax_percentage)) if config else Decimal('0')
 
-        # ── 2. Validate cart items & calculate subtotal ──────────────────────
+        # ── 2. Validate cart & build line items ──────────────────────────────
         order_line_items = []
         subtotal = Decimal('0.00')
 
@@ -55,7 +74,6 @@ class CheckoutView(APIView):
             variant_id = item.get('variant_id')
             product_id = item.get('product_id')
             quantity = int(item.get('quantity', 1))
-            client_price = Decimal(str(item.get('price', 0)))
 
             try:
                 if variant_id:
@@ -74,11 +92,7 @@ class CheckoutView(APIView):
                     server_price = product.price
                     variant_label = ''
 
-                # Use server price (ignore client price to prevent tampering)
-                line_total = server_price * quantity
-                subtotal += line_total
-
-                # Get product image
+                subtotal += server_price * quantity
                 primary_img = product.images.filter(is_primary=True).first() or product.images.first()
                 img_url = request.build_absolute_uri(primary_img.image.url) if primary_img else ''
 
@@ -92,12 +106,9 @@ class CheckoutView(APIView):
                     'image_url': img_url,
                 })
             except (ProductVariant.DoesNotExist, Product.DoesNotExist):
-                return Response(
-                    {'error': f'Product not found'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return Response({'error': 'Product not found'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # ── 3. Coupon validation ─────────────────────────────────────────────
+        # ── 3. Coupon ────────────────────────────────────────────────────────
         discount_amount = Decimal('0.00')
         coupon_obj = None
 
@@ -106,15 +117,9 @@ class CheckoutView(APIView):
                 coupon = Coupon.objects.get(code=coupon_code, active=True)
                 now = timezone.now()
                 if coupon.valid_from > now or coupon.valid_to < now:
-                    return Response(
-                        {'error': 'Coupon has expired'},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
+                    return Response({'error': 'Coupon has expired'}, status=status.HTTP_400_BAD_REQUEST)
                 if coupon.uses_count >= coupon.usage_limit:
-                    return Response(
-                        {'error': 'Coupon usage limit reached'},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
+                    return Response({'error': 'Coupon usage limit reached'}, status=status.HTTP_400_BAD_REQUEST)
                 if subtotal < coupon.min_order_value:
                     return Response(
                         {'error': f'Minimum order of ₹{coupon.min_order_value} required'},
@@ -126,13 +131,32 @@ class CheckoutView(APIView):
                     discount_amount = coupon.value
                 coupon_obj = coupon
             except Coupon.DoesNotExist:
-                return Response(
-                    {'error': 'Invalid coupon code'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                return Response({'error': 'Invalid coupon code'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # ── 4. Fee calculations ──────────────────────────────────────────────
-        taxable = max(Decimal('0'), subtotal - discount_amount)
+        # ── 4. Exchange code ─────────────────────────────────────────────────
+        exchange_obj = None
+        exchange_discount = Decimal('0.00')
+
+        if exchange_code_input:
+            try:
+                exchange_obj = ExchangeCode.objects.get(code=exchange_code_input, is_used=False)
+                # Validate expiry
+                if exchange_obj.expires_at and exchange_obj.expires_at < timezone.now():
+                    return Response({'error': 'Exchange code has expired'}, status=status.HTTP_400_BAD_REQUEST)
+                # Validate minimum order value (new order must be >= original order value)
+                if subtotal < exchange_obj.original_order_value:
+                    return Response(
+                        {'error': f'New order must be at least ₹{exchange_obj.original_order_value} (equal or higher value exchange only)'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                # Exchange discount = full original order value (they get that value for free)
+                exchange_discount = exchange_obj.original_order_value
+            except ExchangeCode.DoesNotExist:
+                return Response({'error': 'Invalid or already used exchange code'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # ── 5. Fee calculations ──────────────────────────────────────────────
+        # Apply coupon first, then exchange discount
+        taxable = max(Decimal('0'), subtotal - discount_amount - exchange_discount)
         tax_amount = (taxable * tax_pct) / 100
 
         if free_threshold > 0 and subtotal >= free_threshold:
@@ -140,11 +164,12 @@ class CheckoutView(APIView):
         else:
             shipping_fee = shipping_flat
 
+        # COD fee on original subtotal (before discounts), as per business rule
         cod_fee = (subtotal * cod_pct / 100) if payment_method == 'COD' else Decimal('0.00')
 
         total_amount = taxable + tax_amount + shipping_fee + cod_fee
 
-        # ── 5. Shipping address fields ───────────────────────────────────────
+        # ── 6. Shipping address ──────────────────────────────────────────────
         first_name = data.get('first_name', '')
         last_name = data.get('last_name', '')
         phone = data.get('phone', '')
@@ -156,7 +181,7 @@ class CheckoutView(APIView):
         zip_code = data.get('zip_code', '')
         country = data.get('country', 'India')
 
-        # ── 6. Create order atomically ───────────────────────────────────────
+        # ── 7. Create order atomically ───────────────────────────────────────
         try:
             with transaction.atomic():
                 order = Order.objects.create(
@@ -173,15 +198,17 @@ class CheckoutView(APIView):
                     zip_code=zip_code,
                     country=country,
                     subtotal=subtotal,
-                    discount_amount=discount_amount,
+                    discount_amount=discount_amount + exchange_discount,
                     shipping_fee=shipping_fee,
                     cod_fee=cod_fee,
                     tax_amount=tax_amount,
                     total_amount=total_amount,
                     coupon_code=coupon_code,
+                    exchange_code_used=exchange_code_input,
                     payment_method=payment_method,
                     payment_status='Pending',
                     order_status='Processing' if payment_method == 'COD' else 'Pending',
+                    accepted_return_policy=accepted_return_policy,
                 )
 
                 for item in order_line_items:
@@ -195,17 +222,21 @@ class CheckoutView(APIView):
                         quantity=item['quantity'],
                         image_url=item['image_url'],
                     )
-                    # Deduct stock immediately for COD
+                    # Deduct stock for COD immediately
                     if payment_method == 'COD' and item['variant']:
                         v = item['variant']
                         v.stock -= item['quantity']
                         v.save()
 
-                # Save as default address
+                # Mark exchange code as used
+                if exchange_obj:
+                    exchange_obj.is_used = True
+                    exchange_obj.used_at = timezone.now()
+                    exchange_obj.save()
+
+                # Save default address
                 if save_as_default:
-                    SavedAddress.objects.filter(
-                        user=request.user, is_default=True
-                    ).update(is_default=False)
+                    SavedAddress.objects.filter(user=request.user, is_default=True).update(is_default=False)
                     SavedAddress.objects.create(
                         user=request.user,
                         label='Home',
@@ -232,11 +263,11 @@ class CheckoutView(APIView):
                     return Response({
                         'order_id': order.id,
                         'payment_method': 'COD',
-                        'message': 'Order placed successfully! Our team will contact you.',
+                        'message': 'Order placed! Our team will contact you.',
                         'total_amount': float(total_amount),
                     }, status=status.HTTP_201_CREATED)
 
-                # Online — create Razorpay order
+                # Online — Razorpay order
                 rzp_order = razorpay_create_order(total_amount)
                 order.razorpay_order_id = rzp_order['id']
                 order.save()
@@ -251,17 +282,107 @@ class CheckoutView(APIView):
                 }, status=status.HTTP_201_CREATED)
 
         except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class CancelOrderView(APIView):
+    """
+    Customer cancels order before it's Confirmed.
+    If paid online, Razorpay refund is initiated automatically.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        try:
+            order = Order.objects.select_for_update().get(pk=pk, user=request.user)
+        except Order.DoesNotExist:
+            return Response({'error': 'Order not found'}, status=404)
+
+        # Only allow cancel if order hasn't been confirmed yet
+        if order.order_status not in ('Pending', 'Processing'):
             return Response(
-                {'error': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {'error': f'Cannot cancel an order that is already {order.order_status}'},
+                status=status.HTTP_400_BAD_REQUEST
             )
 
+        # Restore stock
+        for item in order.items.select_related('variant').all():
+            if item.variant:
+                item.variant.stock += item.quantity
+                item.variant.save()
 
-@api_view(['GET'])
-@permission_classes([permissions.IsAuthenticated])
-def order_detail(request, pk):
-    try:
-        order = Order.objects.prefetch_related('items').get(pk=pk, user=request.user)
-        return Response(OrderSerializer(order).data)
-    except Order.DoesNotExist:
-        return Response({'error': 'Order not found'}, status=404)
+        # If paid online, initiate Razorpay refund
+        refund_initiated = False
+        if order.payment_status == 'Paid' and order.razorpay_payment_id:
+            try:
+                client = _get_client()
+                amount_paise = int(order.total_amount * 100)
+                client.payment.refund(order.razorpay_payment_id, {'amount': amount_paise})
+                order.payment_status = 'Refunded'
+                refund_initiated = True
+            except Exception as e:
+                # Don't block cancellation if refund API fails — admin can do it manually
+                order.payment_status = 'Refund Pending'
+
+        order.order_status = 'Cancelled'
+        order.save()
+        
+
+        return Response({
+            'message': 'Order cancelled successfully.',
+            'refund_initiated': refund_initiated,
+            'note': 'Refund will reflect in 5-7 business days.' if refund_initiated else (
+                'No payment was made — no refund needed.' if order.payment_method == 'COD' else
+                'Refund could not be processed automatically. Please contact support.'
+            )
+        })
+
+
+class ReturnRequestCreateView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, order_id):
+        try:
+            order = Order.objects.get(id=order_id, user=request.user)
+        except Order.DoesNotExist:
+            return Response({'error': 'Order not found'}, status=404)
+
+        if order.order_status != 'Delivered':
+            return Response({'error': 'Only delivered orders can be returned'}, status=400)
+        if not order.accepted_return_policy:
+            return Response({'error': 'Return policy was not accepted at checkout'}, status=400)
+        if not order.delivered_at:
+         return Response({'error': 'Order not yet delivered'}, status=400)
+
+        if (timezone.now() - order.delivered_at).days > 15:
+            return Response({'error': 'Return window of 15 days has expired'}, status=400)
+                
+
+        if order.return_requests.filter(status='Pending').exists():
+            return Response({'error': 'A return request is already pending'}, status=400)
+
+        serializer = ReturnRequestSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save(order=order, user=request.user)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=400)
+
+
+class ValidateExchangeCodeView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        code = request.data.get('code', '').strip().upper()
+        try:
+            exchange = ExchangeCode.objects.get(code=code, is_used=False)
+            if exchange.expires_at and exchange.expires_at < timezone.now():
+                return Response({'valid': False, 'error': 'Exchange code has expired'}, status=400)
+            return Response({
+                'valid': True,
+                'code': exchange.code,
+                'original_order_value': float(exchange.original_order_value),
+                'message': f'Code valid! Min new order: ₹{exchange.original_order_value}',
+            })
+        except ExchangeCode.DoesNotExist:
+            return Response({'valid': False, 'error': 'Invalid or already used exchange code'}, status=400)

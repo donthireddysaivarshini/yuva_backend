@@ -130,34 +130,37 @@ class ReviewListCreateView(generics.ListCreateAPIView):
         variant_info = self.request.data.get('variant_info', 'Standard Variant')
         serializer.save(product=product, user_name=user_name,variant_info=variant_info)
 
-
+# views.py - HomeDataView
 class HomeDataView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
         ctx = {'request': request}
+        # Fetch latest 10 for each category
         return Response({
             'new_arrivals': ProductListSerializer(
-                Product.objects.filter(is_new_arrival=True, is_active=True)[:8],
+                Product.objects.filter(is_new_arrival=True, is_active=True)[:10],
                 many=True, context=ctx
             ).data,
             'best_sellers': ProductListSerializer(
-                Product.objects.filter(is_best_seller=True, is_active=True)[:8],
+                Product.objects.filter(is_best_seller=True, is_active=True)[:10],
                 many=True, context=ctx
             ).data,
             'trending': ProductListSerializer(
-                Product.objects.filter(is_trending=True, is_active=True)[:8],
+                Product.objects.filter(is_trending=True, is_active=True)[:10],
                 many=True, context=ctx
             ).data,
             'best_deals': ProductListSerializer(
-                Product.objects.filter(is_best_deal=True, is_active=True)[:8],
+                Product.objects.filter(is_best_deal=True, is_active=True)[:10],
                 many=True, context=ctx
             ).data,
-            'featured_reviews': ReviewSerializer(
-                Review.objects.filter(is_featured=True).order_by('-created_at')[:6],
-                many=True, context=ctx
+            'categories': CategorySerializer(
+                Category.objects.filter(is_featured=True), 
+                many=True, 
+                context=ctx # Pass the context here!
             ).data,
         })
+    
 
 
 class SiteConfigView(APIView):
